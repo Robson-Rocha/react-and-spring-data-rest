@@ -1,0 +1,70 @@
+parameters:
+- name: Cleanup
+  displayName: Clean up infrastructure? (if false, it will deploy instead)
+  type: boolean
+  default: false
+  
+trigger:
+- main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  tag: $(Build.BuildId)
+  resourceGroup: $[format('RG-{0}', upper(variables['appName']))]
+  SQL_SERVER_PASSWORD: $(sqlServerPassword)
+
+jobs:
+- ${{ if eq(parameters.Cleanup, false) }}:
+  - job: Deploy
+    steps:
+    - task: Maven@3
+      displayName: 'Maven - Build and Test'
+      inputs:
+        mavenPomFile: 'pom.xml'
+        mavenOptions: '-Xmx3072m'
+        javaHomeOption: 'JDKVersion'
+        jdkVersionOption: '1.8'
+        jdkArchitectureOption: 'x64'
+        publishJUnitResults: true
+        testResultsFiles: '**/surefire-reports/TEST-*.xml'
+        goals: 'package'
+
+    - task: Docker@2
+      displayName: 'Docker - Build and push image'
+      inputs:
+        containerRegistry: $(containerRegistry)
+        repository: '$(appName)'
+        command: 'buildAndPush'
+        Dockerfile: 'pipeline/Dockerfile'
+        buildContext: '$(Build.SourcesDirectory)'
+        tags: |
+          $(tag)
+          latest
+
+    - task: AzureResourceManagerTemplateDeployment@3
+      displayName: 'Azure Resource Manager - Provision infrastructure and deploy application'
+      inputs:
+        deploymentScope: 'Resource Group'
+        azureResourceManagerConnection: $(azureSubscriptionConnection)
+        subscriptionId: $(subscriptionId)
+        action: 'Create Or Update Resource Group'
+        resourceGroupName: '$(resourceGroup)'
+        location: '$(location)'
+        templateLocation: 'Linked artifact'
+        csmFile: 'pipeline/arm/template.json'
+        overrideParameters: ' -app_name "$(appName)" -location_name "$(location)" -acr_resourcegroup_name "$(acrResourceGroupName)" -acr_name "$(acrName)" -tag_name "$(tag)" -sqlserver_password "$(SQL_SERVER_PASSWORD)"'
+        deploymentMode: "Complete"
+
+- ${{ if eq(parameters.Cleanup, true) }}:
+  - job: Cleanup
+    steps:
+    - task: AzureResourceManagerTemplateDeployment@3
+      displayName: 'Azure Resource Manager - Cleanup'
+      inputs:
+        deploymentScope: 'Resource Group'
+        azureResourceManagerConnection: $(azureSubscriptionConnection)
+        subscriptionId: $(subscriptionId)
+        action: 'DeleteRG'
+        resourceGroupName: '$(resourceGroup)'
